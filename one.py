@@ -15,7 +15,15 @@ PENDING_DELETE_FILE = os.path.join(BASE_DIR, 'pending_delete.json')
 PHOTO_EXTS = {'.png', '.jpg', '.jpeg'}
 VIDEO_EXTS = {'.mp4', '.mov', '.avi'}
 LOG_FILE = os.path.join(BASE_DIR, 'slideshow.log')
-FFPLAY_COMMON = [
+FFPLAY_IMAGE_COMMON = [
+    'ffplay',
+    '-fs',
+    '-autoexit',
+    '-loglevel',
+    'quiet'
+]
+
+FFPLAY_VIDEO_COMMON = [
     'ffplay',
     '-fs',
     '-autoexit',
@@ -145,7 +153,9 @@ def _scale_image(img, screen_size):
 
 def _play_image(path, screen, screen_size):
     if screen is None or screen_size is None:
-        return _play_image_fallback(path)
+        screen, screen_size = _ensure_screen_safe()
+        if screen is None or screen_size is None:
+            return _play_image_fallback(path)
 
     if not pygame.display.get_init():
         screen, screen_size = _ensure_screen_safe()
@@ -179,7 +189,7 @@ def _play_image_fallback(path):
     proc = None
     try:
         proc = subprocess.Popen(
-            FFPLAY_COMMON + ['-f', 'image2', '-loop', '1', path],
+            FFPLAY_IMAGE_COMMON + ['-f', 'image2', '-loop', '1', path],
             shell=False
         )
         start = time.monotonic()
@@ -205,13 +215,13 @@ def _play_image_fallback(path):
 def _play_video(path):
     proc = None
     try:
-        # Keep the last rendered photo visible until ffplay process starts.
-        proc = subprocess.Popen(
-            FFPLAY_COMMON + [path],
-            shell=False
-        )
+        # Release pygame display so ffplay can take fullscreen cleanly.
         if pygame.display.get_init():
             pygame.display.quit()
+        proc = subprocess.Popen(
+            FFPLAY_VIDEO_COMMON + [path],
+            shell=False
+        )
         while proc.poll() is None:
             if _is_pending(path) or not os.path.exists(path):
                 proc.terminate()
@@ -255,6 +265,8 @@ def run_slideshow():
 
         ext = os.path.splitext(path)[1].lower()
         if ext in PHOTO_EXTS:
+            if screen is None or screen_size is None or not pygame.display.get_init():
+                screen, screen_size = _ensure_screen_safe()
             result = _play_image(path, screen, screen_size)
             if result is None:
                 return
@@ -270,5 +282,3 @@ def run_slideshow():
 
 if __name__ == '__main__':
     run_slideshow()
-
-
