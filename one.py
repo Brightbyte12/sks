@@ -9,6 +9,8 @@ VIDEO_FOLDER = os.path.join(BASE_DIR, 'videos')
 CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 PENDING_DELETE_FILE = os.path.join(BASE_DIR, 'pending_delete.json')
 SLIDESHOW_PID_FILE = os.path.join(BASE_DIR, 'slideshow.pid')
+SLIDESHOW_OUT_LOG_FILE = os.path.join(BASE_DIR, 'slideshow.out.log')
+SLIDESHOW_ERR_LOG_FILE = os.path.join(BASE_DIR, 'slideshow.err.log')
 ALLOWED_PHOTO_EXTS = {'.png', '.jpg', '.jpeg'}
 ALLOWED_VIDEO_EXTS = {'.mp4', '.mov', '.avi'}
 
@@ -172,6 +174,14 @@ def _kill_pid(pid):
                     os.kill(pid, signal.SIGKILL)
     except Exception:
         pass
+
+
+def _slideshow_env():
+    env = os.environ.copy()
+    if os.name != 'nt' and not env.get('DISPLAY'):
+        # Typical Raspberry Pi desktop display.
+        env['DISPLAY'] = ':0'
+    return env
 
 
 HTML_TEMPLATE = """
@@ -589,12 +599,24 @@ def start_slideshow():
 
     if slideshow_process is None or slideshow_process.poll() is not None:
         script_path = os.path.join(BASE_DIR, 'slideshow.py')
-        kwargs = {'cwd': BASE_DIR}
+        kwargs = {'cwd': BASE_DIR, 'env': _slideshow_env()}
         if os.name != 'nt':
             # Run slideshow as its own session so stop can terminate descendants reliably.
             kwargs['start_new_session'] = True
-        slideshow_process = subprocess.Popen([sys.executable, script_path], **kwargs)
+        with open(SLIDESHOW_OUT_LOG_FILE, 'a', encoding='utf-8') as out_log, open(
+            SLIDESHOW_ERR_LOG_FILE, 'a', encoding='utf-8'
+        ) as err_log:
+            slideshow_process = subprocess.Popen(
+                [sys.executable, script_path],
+                stdout=out_log,
+                stderr=err_log,
+                **kwargs
+            )
         _write_pid(slideshow_process.pid)
+        # If process exits immediately, clear stale pid.
+        time.sleep(0.2)
+        if slideshow_process.poll() is not None:
+            _clear_pid()
     return redirect(url_for('index'))
 
 
@@ -668,3 +690,105 @@ if __name__ == '__main__':
     if host == '0.0.0.0':
         print(f"Open from phone on same Wi-Fi: http://{get_lan_ip()}:{port}")
     app.run(host=host, port=port)
+
+
+
+
+
+
+
+
+
+
+
+
+----------------------------------------------------------------------------------------------------------------------------------
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$PROJECT_DIR/.venv"
+REQ_FILE="$PROJECT_DIR/requirements.txt"
+SERVICE_NAME="media-controller.service"
+SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
+RUN_USER="${SUDO_USER:-$USER}"
+
+install_system_packages() {
+  if command -v sudo >/dev/null 2>&1; then
+    sudo apt update
+    sudo apt install -y ffmpeg libsdl2-2.0-0 libsdl2-image-2.0-0 libsdl2-mixer-2.0-0 libsdl2-ttf-2.0-0 python3-venv
+  else
+    apt update
+    apt install -y ffmpeg libsdl2-2.0-0 libsdl2-image-2.0-0 libsdl2-mixer-2.0-0 libsdl2-ttf-2.0-0 python3-venv
+  fi
+}
+
+echo "[1/8] Checking python3..."
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 not found. Install Python3 first."
+  exit 1
+fi
+
+echo "[2/8] Installing system packages..."
+if ! command -v ffplay >/dev/null 2>&1; then
+  install_system_packages
+fi
+
+echo "[3/8] Creating virtual environment..."
+if [ ! -d "$VENV_DIR" ]; then
+  python3 -m venv "$VENV_DIR"
+fi
+
+echo "[4/8] Installing Python dependencies..."
+source "$VENV_DIR/bin/activate"
+python -m pip install --upgrade pip
+pip install -r "$REQ_FILE"
+deactivate
+
+echo "[5/8] Creating runtime folders/files..."
+mkdir -p "$PROJECT_DIR/photos" "$PROJECT_DIR/videos"
+[ -f "$PROJECT_DIR/config.json" ] || printf '{"photo_interval": 5}\n' > "$PROJECT_DIR/config.json"
+[ -f "$PROJECT_DIR/pending_delete.json" ] || printf '[]\n' > "$PROJECT_DIR/pending_delete.json"
+
+echo "[6/8] Disabling old conflicting services (if present)..."
+for old_service in web-slideshow.service slideshow.service; do
+  if systemctl list-unit-files | grep -q "^${old_service}"; then
+    sudo systemctl stop "$old_service" || true
+    sudo systemctl disable "$old_service" || true
+  fi
+done
+
+echo "[7/8] Writing systemd service..."
+sudo tee "$SERVICE_PATH" >/dev/null <<EOF
+[Unit]
+Description=Media Controller Flask App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$RUN_USER
+WorkingDirectory=$PROJECT_DIR
+Environment=PYTHONUNBUFFERED=1
+Environment=DISPLAY=:0
+ExecStart=$VENV_DIR/bin/python $PROJECT_DIR/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "[8/8] Enabling and starting service..."
+sudo systemctl daemon-reload
+sudo systemctl enable --now "$SERVICE_NAME"
+
+IP_ADDR="$(hostname -I | awk '{print $1}')"
+echo
+echo "Setup complete."
+echo "Service status:"
+sudo systemctl --no-pager --full status "$SERVICE_NAME" | sed -n '1,12p'
+echo
+echo "Open on phone/browser:"
+echo "http://$IP_ADDR:5000"
+
