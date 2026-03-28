@@ -192,6 +192,7 @@ def _play_image_fallback(path):
             FFPLAY_IMAGE_COMMON + ['-f', 'image2', '-loop', '1', path],
             shell=False
         )
+        interval_reached = False
         start = time.monotonic()
         while time.monotonic() - start < get_interval():
             if _is_pending(path) or not os.path.exists(path):
@@ -199,7 +200,13 @@ def _play_image_fallback(path):
                 break
             if proc.poll() is not None:
                 break
-            time.sleep(0.1)
+            time.sleep(0.03)
+        else:
+            interval_reached = True
+
+        # Image loop player keeps running; stop it immediately at interval end.
+        if interval_reached and proc.poll() is None:
+            proc.terminate()
         return True
     except Exception as err:
         _log(f"ffplay image fallback failed for {path}: {err}")
@@ -207,7 +214,7 @@ def _play_image_fallback(path):
     finally:
         if proc is not None and proc.poll() is None:
             try:
-                proc.wait(timeout=1)
+                proc.wait(timeout=0.25)
             except Exception:
                 proc.kill()
 
@@ -226,13 +233,13 @@ def _play_video(path):
             if _is_pending(path) or not os.path.exists(path):
                 proc.terminate()
                 break
-            time.sleep(0.1)
+            time.sleep(0.03)
     except Exception as err:
         _log(f"video playback failed for {path}: {err}")
     finally:
         if proc is not None and proc.poll() is None:
             try:
-                proc.wait(timeout=1)
+                proc.wait(timeout=0.25)
             except Exception:
                 proc.kill()
         if _is_pending(path):
